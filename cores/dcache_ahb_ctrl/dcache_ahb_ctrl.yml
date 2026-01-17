@@ -2,5 +2,8 @@
 
 name: dcache_ahb_ctrl
 
+dependencies:
+- ../pkg_dcache/pkg_dcache.yml
+
 files:
 - hdl/dcache_ahb_ctrl.sv

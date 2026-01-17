@@ -35,14 +35,15 @@ module dcache_ahb_ctrl #(
   // -------------------------------------------------------------------------
   // Types and States
   // -------------------------------------------------------------------------
-  typedef enum logic [1:0] {
+  typedef enum logic [2:0] {
     IDLE,
+    FLUSH,
     CMP_TAG,
     R_MISS,
     W_MISS
   } state_e;
 
-  state_e state_t, next_state_t;
+  state_e state_r, next_state;
 
   // -------------------------------------------------------------------------
   // Derived Parameters
@@ -52,6 +53,7 @@ module dcache_ahb_ctrl #(
   localparam int OFFSET_WIDTH   = $clog2(BYTES_PER_WORD);
   localparam int INDEX_WIDTH    = $clog2(NUM_LINES);
   localparam int TAG_WIDTH      = ADDR_LENGTH - INDEX_WIDTH - OFFSET_WIDTH;
+  localparam int HSIZE_WORD     = $clog2(BYTES_PER_WORD);
 
   // Define tag structure using package macro
   parameter type t_dcache_tag = `DCACHE_TAG_T(TAG_WIDTH);
@@ -72,14 +74,21 @@ module dcache_ahb_ctrl #(
   t_dcache_tag          tag_out;
   logic                 tag_hit;
 
-  // Request write register
-  logic req_write_r;
+  // Registers
+  logic                   req_write_r;
+  logic [ADDR_LENGTH-1:0] req_addr_r;
+  logic [WORD_SIZE-1:0]   req_wdata_r;
+  logic [2:0]             req_size_r;
+  logic                   hready_r;
+
+  // Flush Counter
+  logic [$clog2(NUM_LINES)-1:0] flush_cnt;
 
   // -------------------------------------------------------------------------
   // Address Decoding & Read Path
   // -------------------------------------------------------------------------
-  assign req_tag   = req_addr[ADDR_LENGTH-1 -: TAG_WIDTH];
-  assign req_index = req_addr[INDEX_WIDTH+OFFSET_WIDTH-1 -: INDEX_WIDTH];
+  assign req_tag   = req_addr_r[ADDR_LENGTH-1 -: TAG_WIDTH];
+  assign req_index = req_addr_r[INDEX_WIDTH+OFFSET_WIDTH-1 -: INDEX_WIDTH];
 
   assign rdata_mem = data_mem[req_index];
   assign tag_out   = tag_mem[req_index];
@@ -91,9 +100,9 @@ module dcache_ahb_ctrl #(
   // -------------------------------------------------------------------------
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      state_t <= IDLE;
+      state_r <= FLUSH;
     end else begin
-      state_t <= next_state_t;
+      state_r <= next_state;
     end
   end
 
@@ -101,34 +110,43 @@ module dcache_ahb_ctrl #(
   // Next State Logic
   // -------------------------------------------------------------------------
   always_comb begin
-    next_state_t = state_t;
-    case (state_t)
+    next_state = state_r;
+    case (state_r)
+      FLUSH: begin
+        if (flush_cnt == INDEX_WIDTH'(NUM_LINES-1)) begin
+          next_state = IDLE;
+        end
+      end
       IDLE: begin
         if (req_valid) begin
-          next_state_t = CMP_TAG;
+          next_state = CMP_TAG;
         end
       end
       CMP_TAG: begin
         if (tag_hit) begin
-          next_state_t = IDLE;
+          if (req_valid) begin
+            next_state = CMP_TAG;
+          end else begin
+            next_state = IDLE;
+          end
         end else begin
           if (req_write_r) begin
-            next_state_t = W_MISS;
+            next_state = W_MISS;
           end else begin
-            next_state_t = R_MISS;
+            next_state = R_MISS;
           end
         end
       end
       R_MISS: begin
         if (hready && !hresp) begin
-          next_state_t = CMP_TAG;
+          next_state = CMP_TAG;
         end
       end
       W_MISS: begin
-        next_state_t = IDLE;
+        next_state = IDLE;
       end
       default: begin
-        next_state_t = IDLE;
+        next_state = IDLE;
       end
     endcase
   end
@@ -144,27 +162,42 @@ module dcache_ahb_ctrl #(
     haddr      = '0;
     htrans     = 2'b00; // IDLE
     hwrite     = 1'b0;
-    hsize      = req_size;
+    hsize      = req_size_r;
     hwdata     = '0;
 
-    case (state_t)
+    case (state_r)
       IDLE: begin
         req_ready = 1'b1;
+      end
+
+      FLUSH: begin
+        // Busy flushing
       end
 
       CMP_TAG: begin
         if (tag_hit) begin
           resp_valid = 1'b1;
           resp_rdata = rdata_mem;
+          req_ready  = 1'b1; // Ready for next request on hit
         end else begin
           // request data from memory
-          haddr  = req_addr;
+          haddr  = req_addr_r;
           htrans = 2'b10; // NONSEQ
           hwrite = req_write_r;
+          hsize  = 3'(HSIZE_WORD); // Always fetch full word // Always fetch full word
+        end
       end
-
+      R_MISS: begin
+        // if AHB was not ready, hold request high again
+        if (hready_r == 1'b0) begin
+          haddr  = req_addr_r;
+          htrans = 2'b10; // NONSEQ
+          hwrite = req_write_r;
+          hsize  = 3'(HSIZE_WORD);
+        end
+      end
       W_MISS: begin
-        // Placeholder
+        // fix later
       end
     endcase
   end
@@ -172,11 +205,33 @@ module dcache_ahb_ctrl #(
   // -------------------------------------------------------------------------
   // Input Registration
   // -------------------------------------------------------------------------
-  always_ff @(posedge clk) begin
+  always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       req_write_r <= 1'b0;
-    end else if (req_valid) begin
+      req_addr_r  <= '0;
+      req_wdata_r <= '0;
+      req_size_r  <= '0;
+    end else if (req_valid && req_ready) begin
       req_write_r <= req_write;
+      req_addr_r  <= req_addr;
+      req_wdata_r <= req_wdata;
+      req_size_r  <= req_size;
+    end
+  end
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      flush_cnt <= '0;
+    end else if (state_r == FLUSH) begin
+      flush_cnt <= flush_cnt + 1;
+    end
+  end
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      hready_r <= 1'b0;
+    end else begin
+      hready_r <= hready;
     end
   end
 
@@ -184,14 +239,17 @@ module dcache_ahb_ctrl #(
   // Memory Update Logic
   // -------------------------------------------------------------------------
   always_ff @(posedge clk) begin
+    if (state_r == FLUSH) begin
+      tag_mem[flush_cnt].valid <= 1'b0;
+    end
     // Refill on Read Miss (when AHB response is ready)
-    if (state_t == R_MISS && hready && !req_write) begin
+    else if (state_r == R_MISS && hready && !req_write_r) begin
       data_mem[req_index] <= hrdata;
       tag_mem[req_index]  <= '{valid: 1'b1, tag: req_tag};
     end
     // Write Hit
-    else if (state_t == CMP_TAG && tag_hit && req_write) begin
-      data_mem[req_index] <= req_wdata;
+    else if (state_r == CMP_TAG && tag_hit && req_write_r) begin
+      data_mem[req_index] <= req_wdata_r;
     end
   end
 

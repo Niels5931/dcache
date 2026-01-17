@@ -32,10 +32,11 @@ check_syntax:
 	source source_simpl && check_syntax.py $(TARGET)
 
 clean:
-	@rm -rf cores/* 
+	@rm -rf cores/*
 
 verilator:
 	@echo "Generating Verilator file list for $(TARGET)"
 	python3 scripts/python/create_verilator_filelist.py $(TARGET)
 	@echo "Running Verilator for $(TARGET)"
-	verilator --binary -j 0 --trace -Wall --top-module $(TARGET)_tb -f cores/$(TARGET)/sim/verilator_files.f
+	verilator --binary -j 0 --trace -Wall -Wno-fatal --top-module $(TARGET)_tb -f cores/$(TARGET)/sim/verilator_files.f \
+		-timescale 1ns
