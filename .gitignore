@@ -1,0 +1,4 @@
+*_generated
+*__pycache*
+.env
+.nvim
