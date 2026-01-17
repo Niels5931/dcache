@@ -1,0 +1,6 @@
+#%SimplAPI=1.0
+
+name: dcache_ahb_ctrl
+
+files:
+- hdl/dcache_ahb_ctrl.sv
