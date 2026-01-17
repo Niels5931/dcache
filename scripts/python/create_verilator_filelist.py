@@ -110,10 +110,10 @@ def main():
     else:
         print(f"Warning: Simulation file {sim_file} not found.")
 
-    # Output file path: cores/<core_name>/sim/verilator_files.f
-    sim_dir = os.path.join(project_root, "cores", core_name, "sim")
+    # Output file path: cores/<core_name>/sim/_generated/verilator_files.f
+    sim_dir = os.path.join(project_root, "cores", core_name, "sim", "_generated")
     if not os.path.exists(sim_dir):
-        sim_dir = os.path.abspath(f"cores/{core_name}/sim")
+        sim_dir = os.path.abspath(f"cores/{core_name}/sim/_generated")
         
     os.makedirs(sim_dir, exist_ok=True)
     output_file = os.path.join(sim_dir, "verilator_files.f")

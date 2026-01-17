@@ -38,5 +38,8 @@ verilator:
 	@echo "Generating Verilator file list for $(TARGET)"
 	python3 scripts/python/create_verilator_filelist.py $(TARGET)
 	@echo "Running Verilator for $(TARGET)"
-	verilator --binary -j 0 --trace -Wall -Wno-fatal --top-module $(TARGET)_tb -f cores/$(TARGET)/sim/verilator_files.f \
+	verilator --binary -j 0 --trace -Wall -Wno-fatal --top-module $(TARGET)_tb \
+		-f cores/$(TARGET)/sim/_generated/verilator_files.f \
+		--Mdir cores/$(TARGET)/sim/_generated \
+		-o ../$(TARGET)_tb \
 		-timescale 1ns
