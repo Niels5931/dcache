@@ -40,7 +40,8 @@ module dcache_ahb_ctrl #(
     FLUSH,
     CMP_TAG,
     R_MISS,
-    W_MISS
+    W_MISS,
+    W_HIT
   } state_e;
 
   state_e state_r, next_state;
@@ -81,6 +82,9 @@ module dcache_ahb_ctrl #(
   logic [2:0]             req_size_r;
   logic                   hready_r;
 
+  // Current request signals (select between new and registered)
+  logic                   current_write;
+
   // Flush Counter
   logic [$clog2(NUM_LINES)-1:0] flush_cnt;
 
@@ -94,6 +98,9 @@ module dcache_ahb_ctrl #(
   assign tag_out   = tag_mem[req_index];
 
   assign tag_hit   = tag_out.valid && (tag_out.tag == req_tag);
+
+  // Current request write flag - use input when new request valid
+  assign current_write = req_valid ? req_write : req_write_r;
 
   // -------------------------------------------------------------------------
   // State Machine Register
@@ -124,10 +131,14 @@ module dcache_ahb_ctrl #(
       end
       CMP_TAG: begin
         if (tag_hit) begin
-          if (req_valid) begin
-            next_state = CMP_TAG;
+          if (req_write_r) begin
+            next_state = W_HIT;
           end else begin
-            next_state = IDLE;
+            if (req_valid) begin
+              next_state = CMP_TAG;
+            end else begin
+              next_state = IDLE;
+            end
           end
         end else begin
           if (req_write_r) begin
@@ -143,7 +154,22 @@ module dcache_ahb_ctrl #(
         end
       end
       W_MISS: begin
-        next_state = IDLE;
+        if (hready && !hresp && hready_r) begin
+          if (req_valid) begin
+            next_state = CMP_TAG;
+          end else begin
+            next_state = IDLE;
+          end
+        end
+      end
+      W_HIT: begin
+        if (hready && !hresp && hready_r) begin
+          if (req_valid) begin
+            next_state = CMP_TAG;
+          end else begin
+            next_state = IDLE;
+          end
+        end
       end
       default: begin
         next_state = IDLE;
@@ -176,15 +202,21 @@ module dcache_ahb_ctrl #(
 
       CMP_TAG: begin
         if (tag_hit) begin
-          resp_valid = 1'b1;
-          resp_rdata = rdata_mem;
-          req_ready  = 1'b1; // Ready for next request on hit
+          if (req_write_r) begin
+            haddr  = req_addr_r;
+            htrans = 2'b10; // NONSEQ
+            hwrite = 1'b1;
+            hsize  = 3'(HSIZE_WORD);
+          end else begin
+            resp_valid = 1'b1;
+            resp_rdata = rdata_mem;
+            req_ready  = 1'b1;
+          end
         end else begin
-          // request data from memory
           haddr  = req_addr_r;
           htrans = 2'b10; // NONSEQ
           hwrite = req_write_r;
-          hsize  = 3'(HSIZE_WORD); // Always fetch full word // Always fetch full word
+          hsize  = 3'(HSIZE_WORD);
         end
       end
       R_MISS: begin
@@ -197,7 +229,32 @@ module dcache_ahb_ctrl #(
         end
       end
       W_MISS: begin
-        // fix later
+        if (hready_r) begin
+          hwdata = req_wdata_r;
+          if (hready && !hresp) begin
+            resp_valid = 1'b1;
+            req_ready  = 1'b1;
+          end
+        end else begin
+          haddr  = req_addr_r;
+          htrans = 2'b10; // NONSEQ
+          hwrite = 1'b1;
+          hsize  = 3'(HSIZE_WORD);
+        end
+      end
+      W_HIT: begin
+        if (hready_r) begin
+          hwdata = req_wdata_r;
+          if (hready && !hresp) begin
+            resp_valid = 1'b1;
+            req_ready  = 1'b1;
+          end
+        end else begin
+          haddr  = req_addr_r;
+          htrans = 2'b10; // NONSEQ
+          hwrite = 1'b1;
+          hsize  = 3'(HSIZE_WORD);
+        end
       end
     endcase
   end
@@ -243,12 +300,12 @@ module dcache_ahb_ctrl #(
       tag_mem[flush_cnt].valid <= 1'b0;
     end
     // Refill on Read Miss (when AHB response is ready)
-    else if (state_r == R_MISS && hready && !req_write_r) begin
+    else if (state_r == R_MISS && hready && !hresp) begin
       data_mem[req_index] <= hrdata;
       tag_mem[req_index]  <= '{valid: 1'b1, tag: req_tag};
     end
-    // Write Hit
-    else if (state_r == CMP_TAG && tag_hit && req_write_r) begin
+    // Write Hit - update cache after AHB write completes
+    else if (state_r == W_HIT && hready && !hresp && hready_r) begin
       data_mem[req_index] <= req_wdata_r;
     end
   end

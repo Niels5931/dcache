@@ -82,32 +82,38 @@ module dcache_ahb_ctrl_tb;
     forever #5 clk = ~clk;
   end
 
-  // -------------------------------------------------------------------------
+// -------------------------------------------------------------------------
   // AHB Slave Model (Memory)
   // -------------------------------------------------------------------------
-  logic [31:0] memory [logic [31:0]]; // Sparse memory
+  logic [31:0] memory [0:1023]; // 1024-entry memory (bits [11:2] of address)
+  logic [31:0] haddr_r;          // Registered address for data phase
+  logic        hwrite_r;         // Registered write enable for data phase
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       hready <= 1'b1;
       hresp  <= 1'b0;
       hrdata <= '0;
+      haddr_r <= '0;
+      hwrite_r <= 1'b0;
     end else begin
-      // Simple random wait state insertion
-      // hready <= ($random % 5) != 0;
-      hready <= 1'b1; // Always ready for now to simplify
+      hready <= 1'b1;
 
-      if (hready && htrans[1]) begin // NONSEQ or SEQ
-        if (hwrite) begin
-           // Write not tested in read test
-        end else begin
-           // Read
-           if (memory.exists(haddr)) begin
-             hrdata <= memory[haddr];
-           end else begin
-             hrdata <= 32'hDEADBEEF; // Default value
-           end
-        end
+      // Handle data phase (one cycle after address phase)
+      if (hready && hwrite_r) begin
+        memory[haddr_r[11:2]] <= hwdata;
+        $display("AHB Write: addr=%h, idx=%0d, data=%h", haddr_r, haddr_r[11:2], hwdata);
+      end else if (hready && htrans[1] && !hwrite) begin
+        // Read: respond immediately on address phase
+        hrdata <= memory[haddr[11:2]];
+      end
+
+      // Register address phase for next cycle's data phase
+      if (hready && htrans[1]) begin
+        haddr_r <= haddr;
+        hwrite_r <= hwrite;
+      end else begin
+        hwrite_r <= 1'b0;
       end
     end
   end
@@ -147,9 +153,10 @@ module dcache_ahb_ctrl_tb;
         repeat(100) @(posedge clk);
         $display("Error: Timeout waiting for response - %s", msg);
         error_cnt++;
-        disable fork; // Break other thread? No, this is tricky in SV.
       end
     join_any
+
+    disable fork; // Kill the other thread
 
     if (resp_valid) begin
       if (resp_rdata !== expected_data) begin
@@ -158,6 +165,42 @@ module dcache_ahb_ctrl_tb;
       end else begin
         $display("Success: %s. Got: %h", msg, resp_rdata);
       end
+    end
+
+@(posedge clk);
+  endtask
+
+  task perform_write(input logic [31:0] addr, input logic [31:0] wdata, input string msg);
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [31:0] timeout;
+    /* verilator lint_on UNUSEDSIGNAL */
+    timeout = 0;
+
+    wait(req_ready);
+    req_valid = 1'b1;
+    req_addr  = addr;
+    req_wdata = wdata;
+    req_write = 1'b1;
+    req_size  = 3'b010;
+
+    @(posedge clk);
+    req_valid = 1'b0;
+
+    fork
+      begin
+        wait(resp_valid);
+      end
+      begin
+        repeat(100) @(posedge clk);
+        $display("Error: Timeout waiting for write response - %s", msg);
+        error_cnt++;
+      end
+    join_any
+
+    disable fork; // Kill the other thread
+
+    if (resp_valid) begin
+      $display("Success: Write complete - %s. Addr: %h, Data: %h", msg, addr, wdata);
     end
 
     @(posedge clk);
@@ -175,10 +218,12 @@ module dcache_ahb_ctrl_tb;
     req_write = 0;
     req_size = 0;
 
-    // Initialize Memory
-    memory[32'h0000_1000] = 32'hAAAA_BBBB;
-    memory[32'h0000_1004] = 32'hCCCC_DDDD;
-    memory[32'h0000_2000] = 32'h1234_5678;
+// Initialize Memory
+    // Memory index = bits [11:2] of address
+    memory[0]   = 32'hAAAA_BBBB; // 0x0000_0000
+    memory[1]   = 32'hCCCC_DDDD; // 0x0000_0004
+    memory[64]  = 32'h1234_5678; // 0x0000_0100
+    memory[256] = 32'hBEEF_CAFE; // 0x0000_0400
 
     // Reset Sequence
     #20;
@@ -196,32 +241,42 @@ module dcache_ahb_ctrl_tb;
         $display("Flush wait done. DUT State: %d, Flush Cnt: %d", dut.state_r, dut.flush_cnt);
     
         $display("Starting Read Tests...");
-    // Test 1: Read Miss (Address 0x1000)
-    perform_read(32'h0000_1000, 32'hAAAA_BBBB, "Read Miss @ 0x1000");
+    // Test 1: Read Miss (Address 0x0000 - idx 0)
+    perform_read(32'h0000_0000, 32'hAAAA_BBBB, "Read Miss @ 0x0000");
 
-    // Test 2: Read Hit (Address 0x1000)
-    // AHB slave should NOT see a transaction here (checked by observation/waves, or we could add counters)
-    perform_read(32'h0000_1000, 32'hAAAA_BBBB, "Read Hit @ 0x1000");
+    // Test 2: Read Hit (Address 0x0000)
+    perform_read(32'h0000_0000, 32'hAAAA_BBBB, "Read Hit @ 0x0000");
 
-    // Test 3: Read Miss Different Index (Address 0x1004)
-    perform_read(32'h0000_1004, 32'hCCCC_DDDD, "Read Miss @ 0x1004");
+    // Test 3: Read Miss Different Index (Address 0x0004 - idx 1)
+    perform_read(32'h0000_0004, 32'hCCCC_DDDD, "Read Miss @ 0x0004");
 
-    // Test 4: Read Miss Conflict (Address 0x2000) -> Maps to same index as 0x1000?
-    // Index bits:
-    // Offset: 2 bits (Byte 0-3)
-    // Cache: 1024 bytes.
-    // Index Width: $clog2(1024/4) = 8 bits.
-    // Address bits used for index: [9:2]
-    // 0x1000 -> Bin: ...0001 0000 0000 0000. Index = 00.
-    // 0x2000 -> Bin: ...0010 0000 0000 0000. Index = 00.
-    // Same index, different tag. Should be a conflict miss.
-    perform_read(32'h0000_2000, 32'h1234_5678, "Conflict Miss @ 0x2000");
+    // Test 4: Read Miss Conflict (Address 0x0400)
+    // Index 0, Tag 1 - Same index as 0x0000, different tag
+    perform_read(32'h0000_0400, 32'hBEEF_CAFE, "Conflict Miss @ 0x0400");
 
-    // Test 5: Read Hit (Address 0x2000)
-    perform_read(32'h0000_2000, 32'h1234_5678, "Read Hit @ 0x2000");
+    // Test 5: Read Hit (Address 0x0400)
+    perform_read(32'h0000_0400, 32'hBEEF_CAFE, "Read Hit @ 0x0400");
 
-    // Test 6: Read Miss (Address 0x1000) - Should have been evicted
-    perform_read(32'h0000_1000, 32'hAAAA_BBBB, "Read Miss (Evicted) @ 0x1000");
+    // Test 6: Read Miss (Address 0x0000) - Should have been evicted
+    perform_read(32'h0000_0000, 32'hAAAA_BBBB, "Read Miss (Evicted) @ 0x0000");
+
+    // Write Tests
+    $display("Starting Write Tests...");
+
+    // Test 7: Write Hit (Address 0x0000 - recently cached)
+    perform_write(32'h0000_0000, 32'h5555_AAAA, "Write Hit @ 0x0000");
+
+    // Test 8: Read after Write Hit - should get updated value from cache
+    perform_read(32'h0000_0000, 32'h5555_AAAA, "Read after Write Hit @ 0x0000");
+
+    // Test 9: Write Miss (Address 0x0100 - not cached)
+    perform_write(32'h0000_0100, 32'hFEED_FACE, "Write Miss @ 0x0100");
+
+    // Test 10: Read after Write Miss - should fetch from memory (write-through)
+    perform_read(32'h0000_0100, 32'hFEED_FACE, "Read after Write Miss @ 0x0100");
+
+    // Test 11: Write to conflicting address (Address 0x0400 - evicts 0x0000)
+    perform_write(32'h0000_0400, 32'hDEAD_BEEF, "Write Conflict @ 0x0400");
 
 
     if (error_cnt == 0) begin
