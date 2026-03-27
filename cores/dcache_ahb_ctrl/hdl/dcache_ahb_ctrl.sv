@@ -82,9 +82,6 @@ module dcache_ahb_ctrl #(
   logic [2:0]             req_size_r;
   logic                   hready_r;
 
-  // Current request signals (select between new and registered)
-  logic                   current_write;
-
   // Flush Counter
   logic [$clog2(NUM_LINES)-1:0] flush_cnt;
 
@@ -98,9 +95,6 @@ module dcache_ahb_ctrl #(
   assign tag_out   = tag_mem[req_index];
 
   assign tag_hit   = tag_out.valid && (tag_out.tag == req_tag);
-
-  // Current request write flag - use input when new request valid
-  assign current_write = req_valid ? req_write : req_write_r;
 
   // -------------------------------------------------------------------------
   // State Machine Register
@@ -255,6 +249,8 @@ module dcache_ahb_ctrl #(
           hwrite = 1'b1;
           hsize  = 3'(HSIZE_WORD);
         end
+      end
+      default: begin
       end
     endcase
   end
