@@ -7,3 +7,4 @@ dependencies:
 
 files:
 - hdl/dcache_ahb_ctrl.sv
+- hdl/dcache_ahb_ctrl.v
