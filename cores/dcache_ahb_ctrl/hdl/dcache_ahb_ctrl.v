@@ -34,6 +34,7 @@ module dcache_ahb_ctrl #(
   localparam INDEX_WIDTH = $clog2(NUM_LINES);
   localparam TAG_WIDTH = ADDR_LENGTH - INDEX_WIDTH - OFFSET_WIDTH;
   localparam HSIZE_WORD = $clog2(BYTES_PER_WORD);
+  localparam [INDEX_WIDTH-1:0] FLUSH_LAST = NUM_LINES-1;
 
   localparam IDLE = 3'd0;
   localparam FLUSH = 3'd1;
@@ -83,7 +84,7 @@ module dcache_ahb_ctrl #(
     next_state = state_r;
     case (state_r)
       FLUSH: begin
-        if (flush_cnt == NUM_LINES-1[$clog2(NUM_LINES)-1:0]) begin
+        if (flush_cnt == FLUSH_LAST) begin
           next_state = IDLE;
         end
       end
