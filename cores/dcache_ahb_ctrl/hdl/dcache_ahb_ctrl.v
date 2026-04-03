@@ -83,7 +83,7 @@ module dcache_ahb_ctrl #(
     next_state = state_r;
     case (state_r)
       FLUSH: begin
-        if (flush_cnt == NUM_LINES-1) begin
+        if (flush_cnt == NUM_LINES-1[$clog2(NUM_LINES)-1:0]) begin
           next_state = IDLE;
         end
       end
